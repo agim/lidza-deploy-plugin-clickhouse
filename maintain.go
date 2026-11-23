@@ -63,7 +63,10 @@ func maintain(ctx context.Context, m *machine, req pluginapi.Request) (pluginapi
 	if err != nil {
 		return pluginapi.Answer{}, err
 	}
-	var emptied, bounded []string
+	// A table that cannot be changed (ClickHouse marks a damaged leftover
+	// permanently read-only) is named and skipped: it must not stop the
+	// upkeep of the others.
+	var emptied, bounded, skipped []string
 	for _, row := range strings.Split(rows, "\n") {
 		fields := strings.SplitN(row, "\t", 3)
 		if len(fields) != 3 || !namePattern.MatchString(fields[0]) {
@@ -80,7 +83,11 @@ func maintain(ctx context.Context, m *machine, req pluginapi.Request) (pluginapi
 				continue
 			}
 			if _, err := m.admin(ctx, state, "TRUNCATE TABLE IF EXISTS system."+ident(name)); err != nil {
-				return pluginapi.Answer{}, fmt.Errorf("system.%s: %w", name, err)
+				if ctx.Err() != nil {
+					return pluginapi.Answer{}, ctx.Err()
+				}
+				skipped = append(skipped, name+" ("+shortReason(err)+")")
+				continue
 			}
 			emptied = append(emptied, name)
 		case strings.Contains(fields[2], fmt.Sprintf("TTL event_date + toIntervalDay(%d)", days)):
@@ -89,7 +96,11 @@ func maintain(ctx context.Context, m *machine, req pluginapi.Request) (pluginapi
 			// would load the server for nothing. ClickHouse drops the expired
 			// parts in its regular merges over the following hours.
 			if _, err := m.admin(ctx, state, fmt.Sprintf("ALTER TABLE system.%s MODIFY TTL event_date + INTERVAL %d DAY DELETE SETTINGS materialize_ttl_after_modify = 0", ident(name), days)); err != nil {
-				return pluginapi.Answer{}, fmt.Errorf("system.%s: %w", name, err)
+				if ctx.Err() != nil {
+					return pluginapi.Answer{}, ctx.Err()
+				}
+				skipped = append(skipped, name+" ("+shortReason(err)+")")
+				continue
 			}
 			bounded = append(bounded, name)
 		}
@@ -101,6 +112,9 @@ func maintain(ctx context.Context, m *machine, req pluginapi.Request) (pluginapi
 	if len(bounded) > 0 {
 		messages = append(messages, "Limited how long "+strings.Join(bounded, ", ")+" are kept.")
 	}
+	if len(skipped) > 0 {
+		messages = append(messages, "Could not change "+strings.Join(skipped, ", ")+"; the other tables were handled.")
+	}
 	size, _ := m.admin(ctx, state, "SELECT toUInt64(sum(bytes_on_disk)) FROM system.parts WHERE database = 'system' AND active AND match(table, '_log(_[0-9]+)?$')")
 	bytes, _ := strconv.ParseUint(size, 10, 64)
 	if len(messages) == 0 {
@@ -108,4 +122,13 @@ func maintain(ctx context.Context, m *machine, req pluginapi.Request) (pluginapi
 	}
 	messages = append(messages, "They use "+gib(bytes)+".")
 	return pluginapi.Answer{OK: true, Messages: messages}.WithOutput(map[string]uint64{"system_log_bytes": bytes})
+}
+
+// shortReason is the first line of an error, bounded, for a message.
+func shortReason(err error) string {
+	reason, _, _ := strings.Cut(err.Error(), "\n")
+	if len(reason) > 160 {
+		reason = reason[:160] + "…"
+	}
+	return reason
 }

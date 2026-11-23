@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -58,6 +59,20 @@ func TestMaintainBoundsTheServersOwnLogsAndChangesNothingTwice(t *testing.T) {
 			t.Fatalf("%s was changed:\n%s", never, all)
 		}
 	}
+	// A table ClickHouse refuses to change is named and skipped; the rest is handled.
+	withReadOnly := f.m.sql
+	f.m.sql = func(ctx context.Context, port int, user, password, statement string) (string, error) {
+		if strings.Contains(statement, "ALTER TABLE system.`query_log`") {
+			return "", errors.New("ClickHouse answered 500: Code: 774. DB::Exception: Table is in readonly mode. (TABLE_IS_PERMANENTLY_READ_ONLY)")
+		}
+		return withReadOnly(ctx, port, user, password, statement)
+	}
+	f.sqls = nil
+	answer, err = maintain(ctx, f.m, f.request(t, state, "maintain", pluginapi.AppInput{}, ""))
+	if err != nil || !answer.OK || !strings.Contains(strings.Join(answer.Messages, " "), "Could not change query_log (ClickHouse answered 500: Code: 774") || !strings.Contains(strings.Join(f.sqls, "\n"), "TRUNCATE TABLE IF EXISTS system.`trace_log_1`") {
+		t.Fatalf("a read-only table: %v %+v", err, answer)
+	}
+	f.m.sql = withReadOnly
 	// A stopped server is left alone.
 	active, f.sqls = "inactive", nil
 	if answer, err := maintain(ctx, f.m, f.request(t, state, "maintain", pluginapi.AppInput{}, "")); err != nil || !answer.OK || len(f.sqls) != 0 {
