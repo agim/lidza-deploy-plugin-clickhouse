@@ -19,7 +19,7 @@ for arch in amd64 arm64; do
 done
 go run github.com/agim/lidza-deploy/cmd/plugin-sign manifest -name clickhouse -version "$version" -provides clickhouse \
   -summary 'Runs the ClickHouse server of a host for the applications on it.' \
-  -hooks describe,check,status,repair,provision,release,backup,restore \
+  -hooks describe,check,status,repair,provision,release,backup,restore,maintain \
   -env CLICKHOUSE_URL,CLICKHOUSE_DATABASE,CLICKHOUSE_USER,CLICKHOUSE_PASSWORD \
   -archive "amd64=$output/plugin-amd64.tar.gz" -archive "arm64=$output/plugin-arm64.tar.gz" -out "$output/plugin.json"
 echo "Built $output/plugin.json and the archives for version $version."

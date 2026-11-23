@@ -19,6 +19,7 @@ that server and repairs what has one safe answer.
 | `release` | Removes the application's user, profile and database. When no application is left the server is stopped; its packages and data directory stay. |
 | `backup` | Writes a ClickHouse `BACKUP` of the application's database into the directory the agent gives it. The agent archives, stores and schedules it. |
 | `restore` | Replaces the application's database with a backup. The current database is set aside first and only dropped once the restore succeeded; a failed restore puts it back. |
+| `maintain` | Hourly: gives ClickHouse's existing log tables their limits (a few days of queries, part operations, warnings and errors) and empties the profiling and metrics logs. A second run changes nothing. |
 
 ### The server it sets up
 

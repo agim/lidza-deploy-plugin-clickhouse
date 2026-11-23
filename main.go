@@ -37,5 +37,8 @@ func main() {
 		"restore": func(ctx context.Context, req pluginapi.Request) (pluginapi.Answer, error) {
 			return restore(ctx, m, req)
 		},
+		"maintain": func(ctx context.Context, req pluginapi.Request) (pluginapi.Answer, error) {
+			return maintain(ctx, m, req)
+		},
 	})
 }

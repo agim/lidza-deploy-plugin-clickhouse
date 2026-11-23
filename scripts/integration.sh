@@ -70,6 +70,14 @@ ok 'restore' "$answer"
 [[ "$(query "$user" "$password" "SELECT count() FROM system.databases WHERE name LIKE '%lidza_previous'" 2>/dev/null || echo 0)" == 0 ]] || { echo 'the aside copy stayed' >&2; exit 1; }
 [[ -z "$(ls -A /var/lib/clickhouse/lidza-backups/plugin)" ]] || { echo 'the restore left its files on the ClickHouse disk' >&2; exit 1; }
 
+# Upkeep bounds ClickHouse's own logs, and a second run finds nothing to do.
+admin=$(jq -r .admin_password "$state/server.json")
+query default "$admin" 'SYSTEM FLUSH LOGS'
+ok 'maintain' "$(hook maintain '{}')"
+answer=$(hook maintain '{}')
+ok 'maintain again' "$answer"
+jq -e '.messages | join(" ") | test("within their limits")' <<<"$answer" >/dev/null || { echo 'a second upkeep run still changed tables' >&2; exit 1; }
+[[ "$(query default "$admin" "SELECT count() FROM system.tables WHERE database = 'system' AND name = 'trace_log'")" == 0 ]] || { echo 'the profiling log exists although it is switched off' >&2; exit 1; }
 ok 'status' "$(hook status '{}')"
 ok 'check with the server running' "$(hook check '{}')"
 
