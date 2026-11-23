@@ -1,0 +1,40 @@
+name: Release
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: write
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Test, build, sign and publish
+        shell: bash
+        env:
+          PLUGIN_SIGNING_KEY: ${{ secrets.PLUGIN_SIGNING_KEY }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          version=${GITHUB_REF_NAME#v}
+          [[ "$version" =~ ^[0-9]+(\.[0-9]+){0,2}$ ]] || { echo "tag must look like v1, v1.2 or v1.2.3"; exit 1; }
+          [[ -n "$PLUGIN_SIGNING_KEY" ]] || { echo 'the PLUGIN_SIGNING_KEY secret is not set'; exit 1; }
+          go vet ./...
+          go test ./...
+          scripts/build.sh "$version" dist
+          umask 077
+          printf '%s\n' "$PLUGIN_SIGNING_KEY" > "$RUNNER_TEMP/signing.key"
+          go run github.com/agim/lidza-deploy/cmd/plugin-sign sign -key "$RUNNER_TEMP/signing.key" -manifest dist/plugin.json -out dist/plugin.sig
+          rm -f "$RUNNER_TEMP/signing.key"
+          gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes "ClickHouse plugin $version for Līdza Deploy. Install it from a server's Plugins tab: repository ${GITHUB_REPOSITORY}, version ${version}." \
+            dist/plugin.json dist/plugin.sig dist/plugin-amd64.tar.gz dist/plugin-arm64.tar.gz
