@@ -10,7 +10,7 @@ concurrency:
 jobs:
   release:
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
@@ -31,6 +31,8 @@ jobs:
           [[ -n "$PLUGIN_SIGNING_KEY" ]] || { echo 'the PLUGIN_SIGNING_KEY secret is not set'; exit 1; }
           go vet ./...
           go test ./...
+          CGO_ENABLED=0 go build -trimpath -o "$RUNNER_TEMP/plugin" .
+          sudo CI=true scripts/integration.sh "$RUNNER_TEMP/plugin"
           scripts/build.sh "$version" dist
           umask 077
           printf '%s\n' "$PLUGIN_SIGNING_KEY" > "$RUNNER_TEMP/signing.key"

@@ -18,6 +18,8 @@ for arch in amd64 arm64; do
   tar --sort=name --owner=0 --group=0 --numeric-owner --mtime='UTC 2020-01-01' -C "$work/$arch" -czf "$output/plugin-$arch.tar.gz" plugin
 done
 go run github.com/agim/lidza-deploy/cmd/plugin-sign manifest -name clickhouse -version "$version" -provides clickhouse \
-  -summary 'Checks and repairs the ClickHouse server of a host.' -hooks describe,check,status,repair \
+  -summary 'Runs the ClickHouse server of a host for the applications on it.' \
+  -hooks describe,check,status,repair,provision,release,backup,restore \
+  -env CLICKHOUSE_URL,CLICKHOUSE_DATABASE,CLICKHOUSE_USER,CLICKHOUSE_PASSWORD \
   -archive "amd64=$output/plugin-amd64.tar.gz" -archive "arm64=$output/plugin-arm64.tar.gz" -out "$output/plugin.json"
 echo "Built $output/plugin.json and the archives for version $version."

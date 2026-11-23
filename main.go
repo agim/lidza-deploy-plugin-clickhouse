@@ -5,9 +5,10 @@
 // healthy, whether the data that is about to arrive fits where ClickHouse
 // keeps it, and how to bring a failed server back.
 //
-// This version implements the hooks that look at and repair a server:
-// describe, check, status and repair. Creating databases, backups and moves
-// are still done by the agent's built-in ClickHouse support.
+// It also runs the ClickHouse of a host for the applications on it: it
+// installs the server from ClickHouse's own package repository, gives each
+// application a database, a user and a settings profile of its own, backs
+// that database up and restores it.
 package main
 
 import (
@@ -18,12 +19,23 @@ import (
 
 func main() {
 	h := realHost{}
+	m := newMachine()
 	pluginapi.Main(map[string]pluginapi.Handler{
 		"describe": func(context.Context, pluginapi.Request) (pluginapi.Answer, error) {
-			return pluginapi.Answer{OK: true, Messages: []string{"Checks and repairs the ClickHouse server of this host."}}, nil
+			return pluginapi.Answer{OK: true, Messages: []string{"Runs the ClickHouse server of this host for the applications on it."}}, nil
 		},
 		"check":  func(ctx context.Context, req pluginapi.Request) (pluginapi.Answer, error) { return check(ctx, h, req) },
 		"status": func(ctx context.Context, req pluginapi.Request) (pluginapi.Answer, error) { return status(ctx, h) },
 		"repair": func(ctx context.Context, req pluginapi.Request) (pluginapi.Answer, error) { return repair(ctx, h) },
+		"provision": func(ctx context.Context, req pluginapi.Request) (pluginapi.Answer, error) {
+			return provision(ctx, m, req)
+		},
+		"release": func(ctx context.Context, req pluginapi.Request) (pluginapi.Answer, error) {
+			return release(ctx, m, req)
+		},
+		"backup": func(ctx context.Context, req pluginapi.Request) (pluginapi.Answer, error) { return backup(ctx, m, req) },
+		"restore": func(ctx context.Context, req pluginapi.Request) (pluginapi.Answer, error) {
+			return restore(ctx, m, req)
+		},
 	})
 }
