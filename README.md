@@ -20,6 +20,7 @@ that server and repairs what has one safe answer.
 | `backup` | Writes a ClickHouse `BACKUP` of the application's database into the directory the agent gives it. The agent archives, stores and schedules it. |
 | `restore` | Replaces the application's database with a backup. The current database is set aside first and only dropped once the restore succeeded; a failed restore puts it back. |
 | `maintain` | Hourly: gives ClickHouse's existing log tables their limits (a few days of queries, part operations, warnings and errors) and empties the profiling and metrics logs. A second run changes nothing. |
+| `export`, `import` | Move a database to another server in two phases: a full `BACKUP` first, kept on both servers as the base, then, with the application stopped, an incremental `BACKUP` against that base, so only the parts written since travel. When the move ends both servers drop what they kept. |
 
 ### The server it sets up
 
@@ -38,8 +39,8 @@ that server and repairs what has one safe answer.
 A ClickHouse that was on the server before, installed by something else, is
 never touched: `provision` refuses and says so.
 
-Not in this version: moving a database between servers, taking over a
-ClickHouse that Līdza Deploy's built-in support installed, and tuning.
+Not in this version: taking over a ClickHouse that Līdza Deploy's built-in
+support installed, and tuning.
 
 ## Installing it on a server
 

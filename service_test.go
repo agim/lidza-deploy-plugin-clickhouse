@@ -30,8 +30,8 @@ type fakeServer struct {
 }
 
 var (
-	backupTo    = regexp.MustCompile("^BACKUP DATABASE `([A-Za-z0-9_]+)` TO Disk\\('backups', '(plugin/[a-z0-9-]+)/'\\) ASYNC$")
-	restoreFrom = regexp.MustCompile("^RESTORE DATABASE `([A-Za-z0-9_]+)`(?: AS `([A-Za-z0-9_]+)`)? FROM Disk\\('backups', '(plugin/[a-z0-9-]+)/'\\) ASYNC$")
+	backupTo    = regexp.MustCompile("^BACKUP DATABASE `([A-Za-z0-9_]+)` TO Disk\\('backups', '(plugin/[a-z0-9-]+)/'\\)(?: SETTINGS base_backup = Disk\\('backups', 'plugin/[a-z0-9-]+/'\\))? ASYNC$")
+	restoreFrom = regexp.MustCompile("^RESTORE DATABASE `([A-Za-z0-9_]+)`(?: AS `([A-Za-z0-9_]+)`)? FROM Disk\\('backups', '(plugin/[a-z0-9-]+)/'\\)(?: SETTINGS base_backup = Disk\\('backups', 'plugin/[a-z0-9-]+/'\\))? ASYNC$")
 	quoted      = regexp.MustCompile("[`']([A-Za-z0-9_]+)[`']")
 )
 

@@ -40,5 +40,9 @@ func main() {
 		"maintain": func(ctx context.Context, req pluginapi.Request) (pluginapi.Answer, error) {
 			return maintain(ctx, m, req)
 		},
+		"export": func(ctx context.Context, req pluginapi.Request) (pluginapi.Answer, error) { return export(ctx, m, req) },
+		"import": func(ctx context.Context, req pluginapi.Request) (pluginapi.Answer, error) {
+			return importMove(ctx, m, req)
+		},
 	})
 }

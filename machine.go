@@ -47,6 +47,12 @@ func (m *machine) exists(path string) bool {
 	return err == nil
 }
 
+// existsPath is exists for a path that already includes the root.
+func (m *machine) existsPath(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
+
 // write replaces a file when its content or mode differs, atomically, and
 // reports whether it changed.
 func (m *machine) write(path string, data []byte, mode os.FileMode, uid, gid int) (bool, error) {

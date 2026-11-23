@@ -70,6 +70,40 @@ ok 'restore' "$answer"
 [[ "$(query "$user" "$password" "SELECT count() FROM system.databases WHERE name LIKE '%lidza_previous'" 2>/dev/null || echo 0)" == 0 ]] || { echo 'the aside copy stayed' >&2; exit 1; }
 [[ -z "$(ls -A /var/lib/clickhouse/lidza-backups/plugin)" ]] || { echo 'the restore left its files on the ClickHouse disk' >&2; exit 1; }
 
+# A move in two phases, with a second application standing in for the
+# destination: everything first, then only what changed. Each side has its
+# own move id here because both share this machine's backups disk.
+answer=$(hook provision '{"app":"copy"}')
+ok 'provision the destination' "$answer"
+copy_user=$(jq -r .output.env.CLICKHOUSE_USER <<<"$answer")
+copy_password=$(jq -r .output.env.CLICKHOUSE_PASSWORD <<<"$answer")
+copy_record=$(jq -c .output.record <<<"$answer")
+src=aaaaaaaa11111111
+dst=bbbbbbbb22222222
+move_input() { # move_input APP RECORD MOVE_ID PHASE [EXTRA_JSON]
+  jq -nc --arg app "$1" --argjson record "$2" --arg id "$3" --arg phase "$4" --argjson extra "${5:-null}" '{app:$app,record:$record,move:({id:$id,phase:$phase} + ($extra // {}))}'
+}
+bulk=$(mktemp -d)
+final=$(mktemp -d)
+trap 'rm -rf "$state" "$work" "$bulk" "$final"' EXIT
+ok 'export, bulk phase' "$(hook export "$(move_input shop "$record" $src bulk)" "$bulk")"
+ok 'import, bulk phase' "$(hook import "$(move_input copy "$copy_record" $dst bulk)" "$bulk")"
+[[ "$(query "$copy_user" "$copy_password" 'SELECT count() FROM events')" == 50000 ]] || { echo 'the bulk phase did not copy the rows' >&2; exit 1; }
+query "$user" "$password" "INSERT INTO events SELECT number, 'late' FROM numbers(50000, 1000)"
+answer=$(hook export "$(move_input shop "$record" $src final)" "$final")
+ok 'export, final phase' "$answer"
+jq -e '.output.incremental == true' <<<"$answer" >/dev/null || { echo 'the final export is not incremental' >&2; exit 1; }
+[[ $(du -sk "$final/backup" | cut -f1) -lt $(du -sk "$bulk/backup" | cut -f1) ]] || { echo 'the increment is as large as the full copy' >&2; exit 1; }
+# A real destination does not have the base where the source kept it.
+mv "/var/lib/clickhouse/lidza-backups/plugin/move-$src-base" /var/lib/clickhouse/lidza-backups/hidden-source-base
+ok 'import, final phase' "$(hook import "$(move_input copy "$copy_record" $dst final '{"incremental":true}')" "$final")"
+mv /var/lib/clickhouse/lidza-backups/hidden-source-base "/var/lib/clickhouse/lidza-backups/plugin/move-$src-base"
+[[ "$(query "$copy_user" "$copy_password" 'SELECT count(), max(id) FROM events')" == $'51000\t50999' ]] || { echo 'the final phase did not bring the late rows' >&2; exit 1; }
+ok 'export, end of the move' "$(hook export "$(move_input shop "$record" $src end)")"
+ok 'import, end of the move' "$(hook import "$(move_input copy "$copy_record" $dst end)")"
+[[ -z "$(ls -A /var/lib/clickhouse/lidza-backups/plugin)" ]] || { echo 'the move left backups on the ClickHouse disk' >&2; exit 1; }
+ok 'release the destination' "$(hook release '{"app":"copy"}')"
+
 # Upkeep bounds ClickHouse's own logs, and a second run finds nothing to do.
 admin=$(jq -r .admin_password "$state/server.json")
 query default "$admin" 'SYSTEM FLUSH LOGS'
@@ -84,4 +118,4 @@ ok 'check with the server running' "$(hook check '{}')"
 answer=$(hook release '{"app":"shop"}')
 ok 'release' "$answer"
 [[ "$(systemctl is-active clickhouse-server || true)" != active ]] || { echo 'the unused server keeps running' >&2; exit 1; }
-echo 'The plugin installed, provisioned, backed up, restored and released ClickHouse on this machine.'
+echo 'The plugin installed, provisioned, backed up, restored, moved and released ClickHouse on this machine.'

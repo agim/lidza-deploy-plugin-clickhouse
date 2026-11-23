@@ -48,6 +48,9 @@ type backupManifest struct {
 	Database string `json:"database"`
 	Version  string `json:"version"`
 	Created  string `json:"created"`
+	// Incremental marks a move's final export that holds only what changed
+	// since the bulk phase.
+	Incremental bool `json:"incremental,omitempty"`
 }
 
 func ident(name string) string { return "`" + name + "`" } // names match namePattern
@@ -320,18 +323,32 @@ func restore(ctx context.Context, m *machine, req pluginapi.Request) (pluginapi.
 	if err := m.copyTree(filepath.Join(req.WorkDir, "backup"), staged, uid, gid); err != nil {
 		return pluginapi.Answer{}, fmt.Errorf("the backup could not be given to ClickHouse: %w", err)
 	}
-	target, previous := record.Database, record.Database+previousSuffix
+	target := record.Database
+	if err := m.replaceDatabase(ctx, state, target, manifest.Database, backupRef(name)); err != nil {
+		return pluginapi.Answer{}, err
+	}
+	tables, _ := m.admin(ctx, state, "SELECT count() FROM system.tables WHERE database = "+literal(target))
+	return pluginapi.Answer{OK: true, Messages: []string{"Restored the database " + target + " (" + tables + " tables) from the backup of " + manifest.Created + "."}}, nil
+}
+
+// replaceDatabase restores the database source of a backup as target so that
+// a failure leaves target as it was: the current database is renamed aside,
+// the backup is restored under the original name, and the aside copy is
+// dropped only after that succeeded. from is the backup's location, with
+// its settings when it is an increment.
+func (m *machine) replaceDatabase(ctx context.Context, state serverState, target, source, from string) error {
+	previous := target + previousSuffix
 	present := func(database string) (bool, error) {
 		out, err := m.admin(ctx, state, "SELECT count() FROM system.databases WHERE name = "+literal(database))
 		return out == "1", err
 	}
 	hasTarget, err := present(target)
 	if err != nil {
-		return pluginapi.Answer{}, err
+		return err
 	}
 	hasPrevious, err := present(previous)
 	if err != nil {
-		return pluginapi.Answer{}, err
+		return err
 	}
 	drop := func(ctx context.Context, database string) error {
 		_, err := m.admin(ctx, state, "DROP DATABASE IF EXISTS "+ident(database)+" SYNC")
@@ -342,33 +359,32 @@ func restore(ctx context.Context, m *machine, req pluginapi.Request) (pluginapi.
 		// An earlier restore stopped after moving the database aside: the
 		// aside copy is the one to keep; the other is partial.
 		if err := drop(ctx, target); err != nil {
-			return pluginapi.Answer{}, err
+			return err
 		}
 	case hasTarget:
 		if _, err := m.admin(ctx, state, "RENAME DATABASE "+ident(target)+" TO "+ident(previous)); err != nil {
-			return pluginapi.Answer{}, fmt.Errorf("the current database could not be set aside; nothing was changed: %w", err)
+			return fmt.Errorf("the current database could not be set aside; nothing was changed: %w", err)
 		}
 		hasPrevious = true
 	}
-	statement := "RESTORE DATABASE " + ident(manifest.Database)
-	if manifest.Database != target {
+	statement := "RESTORE DATABASE " + ident(source)
+	if source != target {
 		statement += " AS " + ident(target)
 	}
-	if err := m.operation(ctx, state, statement+" FROM "+backupRef(name)); err != nil {
+	if err := m.operation(ctx, state, statement+" FROM "+from); err != nil {
 		undo, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Minute)
 		defer cancel()
 		if hasPrevious && drop(undo, target) == nil {
 			if _, renameErr := m.admin(undo, state, "RENAME DATABASE "+ident(previous)+" TO "+ident(target)); renameErr != nil {
-				return pluginapi.Answer{}, fmt.Errorf("the restore failed: %w; the previous database is kept as %s", err, previous)
+				return fmt.Errorf("the restore failed: %w; the previous database is kept as %s", err, previous)
 			}
 		}
-		return pluginapi.Answer{}, fmt.Errorf("the restore failed and the database is as it was: %w", err)
+		return fmt.Errorf("the restore failed and the database is as it was: %w", err)
 	}
 	if hasPrevious {
 		done, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Minute)
 		defer cancel()
 		_ = drop(done, previous)
 	}
-	tables, _ := m.admin(ctx, state, "SELECT count() FROM system.tables WHERE database = "+literal(target))
-	return pluginapi.Answer{OK: true, Messages: []string{"Restored the database " + target + " (" + tables + " tables) from the backup of " + manifest.Created + "."}}, nil
+	return nil
 }
