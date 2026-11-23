@@ -104,6 +104,34 @@ ok 'import, end of the move' "$(hook import "$(move_input copy "$copy_record" $d
 [[ -z "$(ls -A /var/lib/clickhouse/lidza-backups/plugin)" ]] || { echo 'the move left backups on the ClickHouse disk' >&2; exit 1; }
 ok 'release the destination' "$(hook release '{"app":"copy"}')"
 
+# A hand-over: forget that this plugin installed the server, as if Līdza
+# Deploy's built-in support had, and take it over while it runs. Nothing may
+# restart, no configuration file may change and the application keeps its
+# credentials.
+handed_state=$(mktemp -d)
+started=$(systemctl show clickhouse-server -p ActiveEnterTimestampMonotonic --value)
+sums=$(sha256sum /etc/clickhouse-server/config.d/lidza.xml /etc/clickhouse-server/users.d/lidza.xml /etc/systemd/system/clickhouse-server.service.d/lidza.conf)
+admin=$(jq -r .admin_password "$state/server.json")
+tcp=$(jq -r .tcp_port "$state/server.json")
+own_state=$state
+state=$handed_state
+answer=$(hook check '{"app":"shop"}')
+jq -e '.ok == false and ([.checks[] | select(.id == "ownership")] | length == 1)' <<<"$answer" >/dev/null || { echo "a server this plugin does not run was offered to an application: $answer" >&2; exit 1; }
+handed=$(jq -nc --argjson record "$record" --argjson tcp "$tcp" --arg password "$password" --arg admin "$admin" '{app:"shop",record:($record + {adopt:{tcp_port:$tcp}}),secrets:{password:$password,admin_password:$admin}}')
+answer=$(hook provision "$handed")
+ok 'hand-over' "$answer"
+[[ "$(jq -r .output.env.CLICKHOUSE_PASSWORD <<<"$answer")" == "$password" && "$(jq -r '.output.record | has("adopt")' <<<"$answer")" == false ]] || { echo 'the hand-over changed the application or kept the hand-over data' >&2; exit 1; }
+[[ "$(systemctl show clickhouse-server -p ActiveEnterTimestampMonotonic --value)" == "$started" ]] || { echo 'the hand-over restarted ClickHouse' >&2; exit 1; }
+[[ "$(sha256sum /etc/clickhouse-server/config.d/lidza.xml /etc/clickhouse-server/users.d/lidza.xml /etc/systemd/system/clickhouse-server.service.d/lidza.conf)" == "$sums" ]] || { echo 'the hand-over changed configuration files' >&2; exit 1; }
+[[ "$(jq -r .adopted "$state/server.json")" == true ]] || { echo 'the server is not recorded as handed over' >&2; exit 1; }
+[[ "$(query "$user" "$password" 'SELECT count() FROM events')" == 51000 ]] || { echo 'the application lost its data or access in the hand-over' >&2; exit 1; }
+# The adopted server backs up and restores like any other.
+handed_work=$(mktemp -d)
+trap 'rm -rf "$own_state" "$handed_state" "$work" "$bulk" "$final" "$handed_work"' EXIT
+ok 'backup after the hand-over' "$(hook backup "$input" "$handed_work")"
+ok 'restore after the hand-over' "$(hook restore "$input" "$handed_work")"
+[[ "$(systemctl show clickhouse-server -p ActiveEnterTimestampMonotonic --value)" == "$started" ]] || { echo 'ClickHouse restarted after the hand-over' >&2; exit 1; }
+
 # Upkeep bounds ClickHouse's own logs, and a second run finds nothing to do.
 admin=$(jq -r .admin_password "$state/server.json")
 query default "$admin" 'SYSTEM FLUSH LOGS'

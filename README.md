@@ -39,8 +39,18 @@ that server and repairs what has one safe answer.
 A ClickHouse that was on the server before, installed by something else, is
 never touched: `provision` refuses and says so.
 
-Not in this version: taking over a ClickHouse that Līdza Deploy's built-in
-support installed, and tuning.
+### Taking over a server the built-in support runs
+
+A ClickHouse that Līdza Deploy's own built-in support installed is handed to
+this plugin from the server's Plugins tab. The agent passes each
+application's database with the server's ports and administrator password;
+the plugin proves the password, records the server and makes its directory
+on the backups disk. It writes no configuration file, runs no statement
+against the applications' users and restarts nothing, so applications keep
+serving with the credentials they have. An adopted server keeps the
+configuration the built-in support gave it.
+
+Not in this version: tuning.
 
 ## Installing it on a server
 

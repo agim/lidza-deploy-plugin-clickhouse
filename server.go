@@ -58,6 +58,18 @@ type serverState struct {
 	Installed bool   `json:"installed"`
 	// Databases are the applications' databases on this server.
 	Databases []string `json:"databases,omitempty"`
+	// Adopted marks a server that was installed and configured by Līdza
+	// Deploy's built-in ClickHouse support and handed to this plugin while
+	// running. Its configuration files are left as they are, so taking it
+	// over never restarts it.
+	Adopted bool `json:"adopted,omitempty"`
+}
+
+// handOver is what the agent passes when it hands a running server over.
+type handOver struct {
+	HTTPPort int
+	TCPPort  int
+	Admin    string
 }
 
 func loadState(dir string) (serverState, bool, error) {
@@ -462,12 +474,31 @@ func (m *machine) waitReady(ctx context.Context, state serverState) (string, err
 // ensureServer installs, configures and starts the host's server when
 // needed and answers its record. A server this plugin did not install is
 // left alone.
-func (m *machine) ensureServer(ctx context.Context, req pluginapi.Request, series string) (serverState, error) {
+func (m *machine) ensureServer(ctx context.Context, req pluginapi.Request, series string, adopt *handOver) (serverState, error) {
 	state, known, err := loadState(req.StateDir)
 	if err != nil {
 		return state, err
 	}
 	installed := m.exists(serverBinary)
+	if !known && installed && adopt != nil {
+		return m.adoptServer(ctx, req, *adopt)
+	}
+	if known && state.Adopted {
+		// Configured by the built-in support: only make sure it runs.
+		if out, err := m.run(ctx, "/usr/bin/systemctl", "start", unit); err != nil {
+			return state, errors.New("the ClickHouse server did not start: " + lastLine(out))
+		}
+		version, err := m.waitReady(ctx, state)
+		if err != nil {
+			return state, err
+		}
+		if version != state.Version {
+			parts := strings.SplitN(version, ".", 3)
+			state.Version, state.Series = version, parts[0]+"."+parts[1]
+			return state, saveState(req.StateDir, state)
+		}
+		return state, nil
+	}
 	if !known {
 		if installed {
 			return state, errors.New("ClickHouse is already installed on this server and was not installed by this plugin; it is left unchanged")
@@ -537,5 +568,32 @@ func (m *machine) ensureServer(ctx context.Context, req pluginapi.Request, serie
 	}
 	parts := strings.SplitN(version, ".", 3)
 	state.Version, state.Series, state.Installed = version, parts[0]+"."+parts[1], true
+	return state, saveState(req.StateDir, state)
+}
+
+// adoptServer takes over a running server that Līdza Deploy's built-in
+// support installed: it proves the administrator password it was handed,
+// records the server and makes its own directory on the backups disk.
+// Nothing of the server's configuration is written and nothing restarts.
+func (m *machine) adoptServer(ctx context.Context, req pluginapi.Request, adopt handOver) (serverState, error) {
+	state := serverState{HTTPPort: adopt.HTTPPort, TCPPort: adopt.TCPPort, Admin: adopt.Admin, Installed: true, Adopted: true}
+	if adopt.HTTPPort < 1024 || adopt.HTTPPort > 65535 || adopt.TCPPort < 1024 || adopt.TCPPort > 65535 || adopt.Admin == "" {
+		return state, errors.New("the hand-over does not describe the server")
+	}
+	probe, cancel := context.WithTimeout(ctx, 15*time.Second)
+	version, err := m.admin(probe, state, "SELECT version()")
+	cancel()
+	if err != nil || !fullVersionPattern.MatchString(version) {
+		return state, errors.New("the ClickHouse server did not accept the administrator password it was handed over with; nothing was changed")
+	}
+	parts := strings.SplitN(version, ".", 3)
+	state.Version, state.Series = version, parts[0]+"."+parts[1]
+	uid, gid, err := m.account()
+	if err != nil {
+		return state, err
+	}
+	if err := m.mkdir(filepath.Join(backupDir, backupSubdir), uid, gid); err != nil {
+		return state, err
+	}
 	return state, saveState(req.StateDir, state)
 }

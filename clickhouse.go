@@ -160,6 +160,14 @@ func check(ctx context.Context, h host, req pluginapi.Request) (pluginapi.Answer
 		checks = append(checks, pluginapi.Check{ID: "server", Title: "ClickHouse server", OK: true, Caution: true, Detail: "The ClickHouse server is installed but stopped (its service is " + state + " and did not fail, so it was stopped on purpose)."})
 	}
 
+	// A server the built-in support runs is not this plugin's to give
+	// databases on, until it is handed over.
+	if in.App != "" && installed && req.StateDir != "" {
+		if _, known, err := loadState(req.StateDir); err == nil && !known {
+			checks = append(checks, pluginapi.Check{ID: "ownership", Title: "ClickHouse ownership", Detail: "The ClickHouse on this server is run by Līdza Deploy's built-in support, not by this plugin. Hand it over first, in the server's Plugins tab."})
+		}
+	}
+
 	// Room for the data, where ClickHouse keeps it. A backup is unpacked
 	// next to the tables it restores.
 	if incoming := in.Sizes["clickhouse"]; incoming > 0 {

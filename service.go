@@ -40,6 +40,12 @@ type serviceRecord struct {
 	Database       string `json:"database"`
 	HTTPPort       int    `json:"http_port"`
 	QueryMemoryMiB int    `json:"query_memory_mib,omitempty"`
+	// Adopt is set by the agent, once, when it hands over a database its
+	// built-in ClickHouse support created; the administrator password
+	// comes with the secrets. It is never part of what provision answers.
+	Adopt *struct {
+		TCPPort int `json:"tcp_port"`
+	} `json:"adopt,omitempty"`
 }
 
 // backupManifest describes a backup directory.
@@ -117,17 +123,33 @@ func provision(ctx context.Context, m *machine, req pluginapi.Request) (pluginap
 		}
 	}
 	password := in.Secrets["password"]
+	// A hand-over: the database, its user and the server exist and serve
+	// the application right now, so nothing of them is touched.
+	var adopt *handOver
+	var handed serviceRecord
+	if len(in.Record) > 0 && json.Unmarshal(in.Record, &handed) == nil && handed.Adopt != nil {
+		if handed.Database != name || password == "" {
+			return pluginapi.Answer{}, errors.New("the hand-over does not match the application")
+		}
+		adopt = &handOver{HTTPPort: handed.HTTPPort, TCPPort: handed.Adopt.TCPPort, Admin: in.Secrets["admin_password"]}
+	}
 	if password == "" {
 		password = randomSecret()
 	}
-	state, err := m.ensureServer(ctx, req, want.Series)
+	state, err := m.ensureServer(ctx, req, want.Series, adopt)
 	if err != nil {
 		return pluginapi.Answer{}, err
 	}
 	_, _, queryMiB := memory(req.Server)
-	for _, statement := range provisionSQL(name, password, queryMiB) {
-		if _, err := m.admin(ctx, state, statement); err != nil {
-			return pluginapi.Answer{}, fmt.Errorf("the application's database and user could not be created: %w", err)
+	if adopt != nil {
+		if handed.QueryMemoryMiB > 0 {
+			queryMiB = handed.QueryMemoryMiB
+		}
+	} else {
+		for _, statement := range provisionSQL(name, password, queryMiB) {
+			if _, err := m.admin(ctx, state, statement); err != nil {
+				return pluginapi.Answer{}, fmt.Errorf("the application's database and user could not be created: %w", err)
+			}
 		}
 	}
 	// Prove the application's own credential before handing it out.
