@@ -115,7 +115,7 @@ admin=$(jq -r .admin_password "$state/server.json")
 tcp=$(jq -r .tcp_port "$state/server.json")
 own_state=$state
 state=$handed_state
-answer=$(hook check '{"app":"shop"}')
+answer=$(hook check '{"app":"shop"}' || true) # a failing check exits non-zero
 jq -e '.ok == false and ([.checks[] | select(.id == "ownership")] | length == 1)' <<<"$answer" >/dev/null || { echo "a server this plugin does not run was offered to an application: $answer" >&2; exit 1; }
 handed=$(jq -nc --argjson record "$record" --argjson tcp "$tcp" --arg password "$password" --arg admin "$admin" '{app:"shop",record:($record + {adopt:{tcp_port:$tcp}}),secrets:{password:$password,admin_password:$admin}}')
 answer=$(hook provision "$handed")
