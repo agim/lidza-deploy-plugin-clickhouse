@@ -4,7 +4,7 @@
 # with bounded batches and merges held back? Runs on a throwaway CI machine.
 #   sudo experiments/json-load.sh ./plugin ROWS_IN_MILLIONS CAP_MIB
 set -euo pipefail
-plugin=$(readlink -f "$1"); millions=${2:-12}; cap=${3:-1536}
+plugin=$(readlink -f "$1"); millions=${2:-12}
 [[ $EUID -eq 0 && "${CI:-}" == true ]] || { echo 'CI only, as root' >&2; exit 2; }
 state=$(mktemp -d); arch=$(dpkg --print-architecture)
 flags=$(grep -m1 '^flags' /proc/cpuinfo | cut -d: -f2 | xargs -n1 | jq -R . | jq -sc .)
@@ -42,36 +42,37 @@ echo '== exporting the way the agent does (SELECT * FORMAT Native)'
 curl -fsS -H 'X-ClickHouse-User: default' -H "X-ClickHouse-Key: $admin" --data-binary 'SELECT * FROM src.events FORMAT Native' 'http://127.0.0.1:8123/' -o /mnt/events.native
 ls -la /mnt/events.native | awk '{print "export file: " int($5/1048576) " MiB"}'
 
-echo "== capping the server at $cap MiB and restarting"
-cat > /etc/clickhouse-server/config.d/zz-experiment.xml <<XML
-<clickhouse><max_server_memory_usage>$(( cap << 20 ))</max_server_memory_usage><max_server_memory_usage_to_ram_ratio>1</max_server_memory_usage_to_ram_ratio></clickhouse>
+caps=${3:-3072}
+restart_with() { # restart_with CAP_MIB
+  cat > /etc/clickhouse-server/config.d/zz-experiment.xml <<XML
+<clickhouse><max_server_memory_usage>$(( $1 << 20 ))</max_server_memory_usage><max_server_memory_usage_to_ram_ratio>1</max_server_memory_usage_to_ram_ratio></clickhouse>
 XML
-systemctl restart clickhouse-server
-for _ in $(seq 1 60); do q 'SELECT 1' >/dev/null 2>&1 && break; sleep 1; done
-
-# load NAME INSERT_SETTINGS HOLD_MERGES
+  systemctl restart clickhouse-server
+  for _ in $(seq 1 90); do q 'SELECT 1' >/dev/null 2>&1 && return 0; sleep 1; done
+  echo 'the server did not come back' >&2; return 1
+}
+# load NAME CAP INSERT_SETTINGS HOLD_MERGES: a fresh server, one load, then a full merge.
 load() {
-  local name=$1 settings=$2 hold=$3 peak=0 status
+  local name=$1 cap=$2 settings=$3 hold=$4 peak status took started
+  restart_with "$cap"
   q "CREATE DATABASE $name"; q "$(table "$name")"
   [[ $hold == yes ]] && q "SYSTEM STOP MERGES $name.events"
-  ( while :; do m=$(q "SELECT value FROM system.metrics WHERE metric = 'MemoryTracking'" 2>/dev/null || echo 0); echo "$m"; sleep 0.5; done ) > "/tmp/mem.$name" &
+  ( while :; do q "SELECT value FROM system.metrics WHERE metric = 'MemoryTracking'" 2>/dev/null || echo 0; sleep 0.5; done ) > "/tmp/mem.$name" &
   local sampler=$!
-  local started=$SECONDS
+  started=$SECONDS
   status=$(curl -sS -o "/tmp/out.$name" -w '%{http_code}' -H 'X-ClickHouse-User: default' -H "X-ClickHouse-Key: $admin" -X POST -T /mnt/events.native "http://127.0.0.1:8123/?wait_end_of_query=1&query=$(jq -rn --arg q "INSERT INTO $name.events SETTINGS $settings FORMAT Native" '$q|@uri')" || true)
-  local took=$(( SECONDS - started ))
+  took=$(( SECONDS - started ))
   kill "$sampler" 2>/dev/null || true; wait "$sampler" 2>/dev/null || true
   peak=$(sort -n "/tmp/mem.$name" | tail -1)
   [[ $hold == yes ]] && q "SYSTEM START MERGES $name.events"
-  echo "RESULT $name: HTTP $status in ${took}s, peak tracked memory $(( peak >> 20 )) MiB of $cap MiB, rows loaded $(q "SELECT count() FROM $name.events"), parts $(q "SELECT count() FROM system.parts WHERE database = '$name' AND active")"
-  [[ $status == 200 ]] || echo "  error: $(head -c 300 "/tmp/out.$name" | tr '\n' ' ')"
-  echo "  merges of this table while loading: $(q "SELECT concat(toString(countIf(event_type = 'MergeParts')), ' merges, largest ', formatReadableSize(maxIf(peak_memory_usage, event_type = 'MergeParts'))) FROM system.part_log WHERE database = '$name'" 2>/dev/null || echo unknown)"
+  echo "RESULT cap ${cap} MiB, $name: HTTP $status in ${took}s, peak $(( peak >> 20 )) MiB, rows $(q "SELECT count() FROM $name.events") of $rows, parts $(q "SELECT count() FROM system.parts WHERE database = '$name' AND active")"
+  if [[ $status != 200 ]]; then echo "  error: $(head -c 220 "/tmp/out.$name" | tr '\n' ' ')"; q "DROP DATABASE $name SYNC"; return 0; fi
+  if q "OPTIMIZE TABLE $name.events FINAL" >/dev/null 2>/tmp/merge.err; then echo "  full merge under the cap: ok, rows $(q "SELECT count() FROM $name.events")"; else echo "  full merge under the cap: $(head -c 220 /tmp/merge.err | tr '\n' ' ')"; fi
+  q "DROP DATABASE $name SYNC"
 }
-echo '== A: the agent today'
-load dst_a 'optimize_on_insert = 0' no
-echo '== B: bounded batches, one insert thread, merges held until the table is in'
-load dst_b 'optimize_on_insert = 0, max_insert_threads = 1, max_insert_block_size = 250000, min_insert_block_size_rows = 250000, min_insert_block_size_bytes = 134217728' yes
-echo '== C: bounded batches and one insert thread, merges running'
-load dst_c 'optimize_on_insert = 0, max_insert_threads = 1, max_insert_block_size = 250000, min_insert_block_size_rows = 250000, min_insert_block_size_bytes = 134217728' no
-echo '== after the load: merging B with the cap in place'
-q 'OPTIMIZE TABLE dst_b.events FINAL' >/dev/null 2>/tmp/merge.err && echo 'merge of B: ok' || echo "merge of B: $(head -c 300 /tmp/merge.err)"
-echo "B rows after merging: $(q 'SELECT count() FROM dst_b.events'), source rows: $(q 'SELECT count() FROM src.events')"
+rows=$(q 'SELECT count() FROM src.events')
+for cap in $caps; do
+  echo "== cap $cap MiB"
+  load "today_$cap" "$cap" 'optimize_on_insert = 0' no
+  load "small_$cap" "$cap" 'optimize_on_insert = 0, max_insert_threads = 1, max_insert_block_size = 65536, min_insert_block_size_rows = 65536, min_insert_block_size_bytes = 67108864' yes
+done
