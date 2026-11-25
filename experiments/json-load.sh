@@ -22,6 +22,14 @@ q() {
 echo "server: $(q 'SELECT version()'), host memory $((memory >> 20)) MiB, $(nproc) cores"
 
 table() { echo "CREATE TABLE $1.events (id UUID, app LowCardinality(String), env LowCardinality(String), stream LowCardinality(String), level LowCardinality(String), ts DateTime64(3, 'UTC'), received_at DateTime64(3, 'UTC'), message String, trace String, attrs JSON(max_dynamic_paths=256), retain_days UInt16, INDEX message_tokens message TYPE tokenbf_v1(8192, 3, 0) GRANULARITY 4) ENGINE = MergeTree PARTITION BY toYYYYMM(ts) ORDER BY (app, stream, ts) SETTINGS index_granularity = 8192"; }
+# Generating needs room: the cap under test comes afterwards.
+cat > /etc/clickhouse-server/config.d/zz-experiment.xml <<XML
+<clickhouse><max_server_memory_usage>$(( 12288 << 20 ))</max_server_memory_usage><max_server_memory_usage_to_ram_ratio>1</max_server_memory_usage_to_ram_ratio></clickhouse>
+XML
+systemctl daemon-reload; mkdir -p /etc/systemd/system/clickhouse-server.service.d
+printf '[Service]\nMemoryMax=infinity\n' > /etc/systemd/system/clickhouse-server.service.d/zz-experiment.conf
+systemctl daemon-reload; systemctl restart clickhouse-server
+for _ in $(seq 1 60); do q 'SELECT 1' >/dev/null 2>&1 && break; sleep 1; done
 q 'CREATE DATABASE src'; q "$(table src)"
 echo "== generating $millions million rows with about 300 distinct JSON keys"
 for i in $(seq 1 "$millions"); do
@@ -56,6 +64,7 @@ load() {
   [[ $hold == yes ]] && q "SYSTEM START MERGES $name.events"
   echo "RESULT $name: HTTP $status in ${took}s, peak tracked memory $(( peak >> 20 )) MiB of $cap MiB, rows loaded $(q "SELECT count() FROM $name.events"), parts $(q "SELECT count() FROM system.parts WHERE database = '$name' AND active")"
   [[ $status == 200 ]] || echo "  error: $(head -c 300 "/tmp/out.$name" | tr '\n' ' ')"
+  echo "  merges of this table while loading: $(q "SELECT concat(toString(countIf(event_type = 'MergeParts')), ' merges, largest ', formatReadableSize(maxIf(peak_memory_usage, event_type = 'MergeParts'))) FROM system.part_log WHERE database = '$name'" 2>/dev/null || echo unknown)"
 }
 echo '== A: the agent today'
 load dst_a 'optimize_on_insert = 0' no
