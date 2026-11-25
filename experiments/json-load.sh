@@ -57,7 +57,7 @@ load() {
   ( while :; do m=$(q "SELECT value FROM system.metrics WHERE metric = 'MemoryTracking'" 2>/dev/null || echo 0); echo "$m"; sleep 0.5; done ) > "/tmp/mem.$name" &
   local sampler=$!
   local started=$SECONDS
-  status=$(curl -sS -o "/tmp/out.$name" -w '%{http_code}' -H 'X-ClickHouse-User: default' -H "X-ClickHouse-Key: $admin" -T /mnt/events.native "http://127.0.0.1:8123/?wait_end_of_query=1&query=$(jq -rn --arg q "INSERT INTO $name.events SETTINGS $settings FORMAT Native" '$q|@uri')" || true)
+  status=$(curl -sS -o "/tmp/out.$name" -w '%{http_code}' -H 'X-ClickHouse-User: default' -H "X-ClickHouse-Key: $admin" -X POST -T /mnt/events.native "http://127.0.0.1:8123/?wait_end_of_query=1&query=$(jq -rn --arg q "INSERT INTO $name.events SETTINGS $settings FORMAT Native" '$q|@uri')" || true)
   local took=$(( SECONDS - started ))
   kill "$sampler" 2>/dev/null || true; wait "$sampler" 2>/dev/null || true
   peak=$(sort -n "/tmp/mem.$name" | tail -1)
