@@ -12,14 +12,20 @@ memory=$(( $(awk '/^MemTotal:/{print $2}' /proc/meminfo) * 1024 ))
 jq -nc --arg state "$state" --arg arch "$arch" --argjson flags "$flags" --argjson memory "$memory" \
   '{contract:1,hook:"provision",state_dir:$state,input:{app:"shop",options:{series:"26.3"}},server:{arch:$arch,cpu_flags:$flags,memory_bytes:$memory}}' | (cd "$state" && "$plugin" provision) | jq -c '{ok, messages}'
 admin=$(jq -r .admin_password "$state/server.json")
-q() { curl -fsS -H 'X-ClickHouse-User: default' -H "X-ClickHouse-Key: $admin" --data-binary "$1" 'http://127.0.0.1:8123/'; }
+q() {
+  local out code
+  out=$(curl -sS -w '\n%{http_code}' -H 'X-ClickHouse-User: default' -H "X-ClickHouse-Key: $admin" --data-binary "$1" 'http://127.0.0.1:8123/')
+  code=${out##*$'\n'}; out=${out%$'\n'*}
+  if [[ $code != 200 ]]; then echo "ClickHouse refused (HTTP $code): ${out:0:400}" >&2; return 1; fi
+  printf '%s\n' "$out"
+}
 echo "server: $(q 'SELECT version()'), host memory $((memory >> 20)) MiB, $(nproc) cores"
 
 table() { echo "CREATE TABLE $1.events (id UUID, app LowCardinality(String), env LowCardinality(String), stream LowCardinality(String), level LowCardinality(String), ts DateTime64(3, 'UTC'), received_at DateTime64(3, 'UTC'), message String, trace String, attrs JSON(max_dynamic_paths=256), retain_days UInt16, INDEX message_tokens message TYPE tokenbf_v1(8192, 3, 0) GRANULARITY 4) ENGINE = MergeTree PARTITION BY toYYYYMM(ts) ORDER BY (app, stream, ts) SETTINGS index_granularity = 8192"; }
 q 'CREATE DATABASE src'; q "$(table src)"
 echo "== generating $millions million rows with about 300 distinct JSON keys"
 for i in $(seq 1 "$millions"); do
-  q "INSERT INTO src.events SELECT generateUUIDv4(), concat('app', toString(number % 6)), 'production', concat('stream', toString(number % 12)), 'info', now64(3) - toIntervalSecond(number % 2000000), now64(3), concat('GET /path/', toString(number % 5000), ' ', repeatString('m', 40 + number % 60)), if(number % 50 = 0, repeatString('at frame() ', 30), ''), CAST(toJSONString(map(concat('k', toString(number % 300)), toString(number), concat('k', toString((number * 7) % 300)), toString(number % 97), concat('k', toString((number * 13) % 300)), 'value', 'path', concat('/p/', toString(number % 1000)), 'status', toString(200 + number % 5), 'ms', toString(number % 900))) AS JSON(max_dynamic_paths=256)), 30 FROM numbers($(( (i-1) * 1000000 )), 1000000) SETTINGS max_insert_block_size = 100000, max_threads = 2"
+  q "INSERT INTO src.events SELECT generateUUIDv4(), concat('app', toString(number % 6)), 'production', concat('stream', toString(number % 12)), 'info', now64(3) - toIntervalSecond(number % 2000000), now64(3), concat('GET /path/', toString(number % 5000), ' ', repeat('m', 40 + number % 60)), if(number % 50 = 0, repeat('at frame() ', 30), ''), CAST(toJSONString(map(concat('k', toString(number % 300)), toString(number), concat('k', toString((number * 7) % 300)), toString(number % 97), concat('k', toString((number * 13) % 300)), 'value', 'path', concat('/p/', toString(number % 1000)), 'status', toString(200 + number % 5), 'ms', toString(number % 900))) AS JSON(max_dynamic_paths=256)), 30 FROM numbers($(( (i-1) * 1000000 )), 1000000) SETTINGS max_insert_block_size = 100000, max_threads = 2"
 done
 q 'OPTIMIZE TABLE src.events FINAL' || true
 echo "source table: $(q "SELECT concat(toString(sum(rows)), ' rows, ', formatReadableSize(sum(data_uncompressed_bytes)), ' uncompressed, ', toString(count()), ' parts') FROM system.parts WHERE database = 'src' AND active")"
