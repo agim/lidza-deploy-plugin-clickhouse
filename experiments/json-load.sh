@@ -21,7 +21,7 @@ q() {
 }
 echo "server: $(q 'SELECT version()'), host memory $((memory >> 20)) MiB, $(nproc) cores"
 
-table() { echo "CREATE TABLE $1.events (id UUID, app LowCardinality(String), env LowCardinality(String), stream LowCardinality(String), level LowCardinality(String), ts DateTime64(3, 'UTC'), received_at DateTime64(3, 'UTC'), message String, trace String, attrs JSON(max_dynamic_paths=256), retain_days UInt16, INDEX message_tokens message TYPE tokenbf_v1(8192, 3, 0) GRANULARITY 4) ENGINE = MergeTree PARTITION BY toYYYYMM(ts) ORDER BY (app, stream, ts) SETTINGS index_granularity = 8192"; }
+table() { echo "CREATE TABLE $1.events (id UUID, app LowCardinality(String), env LowCardinality(String), stream LowCardinality(String), level LowCardinality(String), ts DateTime64(3, 'UTC'), received_at DateTime64(3, 'UTC'), message String, trace String, attrs JSON(max_dynamic_paths=256), retain_days UInt16, INDEX message_tokens message TYPE tokenbf_v1(8192, 3, 0) GRANULARITY 4) ENGINE = MergeTree PARTITION BY toYYYYMM(ts) ORDER BY (app, stream, ts) SETTINGS index_granularity = 8192, max_bytes_to_merge_at_max_space_in_pool = 33554432, non_replicated_deduplication_window = 100000"; }
 # Generating needs room: the cap under test comes afterwards.
 cat > /etc/clickhouse-server/config.d/zz-experiment.xml <<XML
 <clickhouse><max_server_memory_usage>$(( 12288 << 20 ))</max_server_memory_usage><max_server_memory_usage_to_ram_ratio>1</max_server_memory_usage_to_ram_ratio></clickhouse>
@@ -30,7 +30,7 @@ systemctl daemon-reload; mkdir -p /etc/systemd/system/clickhouse-server.service.
 printf '[Service]\nMemoryMax=infinity\n' > /etc/systemd/system/clickhouse-server.service.d/zz-experiment.conf
 systemctl daemon-reload; systemctl restart clickhouse-server
 for _ in $(seq 1 60); do q 'SELECT 1' >/dev/null 2>&1 && break; sleep 1; done
-q 'CREATE DATABASE src'; q "$(table src)"
+q 'CREATE DATABASE src'; q "$(table src)"; q 'ALTER TABLE src.events MODIFY SETTING max_bytes_to_merge_at_max_space_in_pool = 161061273600'
 echo "== generating $millions million rows with about 300 distinct JSON keys"
 for i in $(seq 1 "$millions"); do
   q "INSERT INTO src.events SELECT generateUUIDv4(), concat('app', toString(number % 6)), 'production', concat('stream', toString(number % 12)), 'info', now64(3) - toIntervalSecond(number % 2000000), now64(3), concat('GET /path/', toString(number % 5000), ' ', repeat('m', 40 + number % 60)), if(number % 50 = 0, repeat('at frame() ', 30), ''), CAST(toJSONString(map(concat('k', toString(number % 300)), toString(number), concat('k', toString((number * 7) % 300)), toString(number % 97), concat('k', toString((number * 13) % 300)), 'value', 'path', concat('/p/', toString(number % 1000)), 'status', toString(200 + number % 5), 'ms', toString(number % 900))) AS JSON(max_dynamic_paths=256)), 30 FROM numbers($(( (i-1) * 1000000 )), 1000000) SETTINGS max_insert_block_size = 100000, max_threads = 2, type_json_skip_duplicated_paths = 1"
@@ -67,7 +67,13 @@ load() {
   [[ $hold == yes ]] && q "SYSTEM START MERGES $name.events"
   echo "RESULT cap ${cap} MiB, $name: HTTP $status in ${took}s, peak $(( peak >> 20 )) MiB, rows $(q "SELECT count() FROM $name.events") of $rows, parts $(q "SELECT count() FROM system.parts WHERE database = '$name' AND active")"
   if [[ $status != 200 ]]; then echo "  error: $(head -c 220 "/tmp/out.$name" | tr '\n' ' ')"; q "DROP DATABASE $name SYNC"; return 0; fi
-  if q "OPTIMIZE TABLE $name.events FINAL" >/dev/null 2>/tmp/merge.err; then echo "  full merge under the cap: ok, rows $(q "SELECT count() FROM $name.events")"; else echo "  full merge under the cap: $(head -c 220 /tmp/merge.err | tr '\n' ' ')"; fi
+  # Ordinary background merging for a while, as after a real load.
+  ( while :; do q "SELECT value FROM system.metrics WHERE metric = 'MemoryTracking'" 2>/dev/null || echo 0; sleep 0.5; done ) > "/tmp/merge.$name" &
+  sampler=$!
+  sleep 75
+  kill "$sampler" 2>/dev/null || true; wait "$sampler" 2>/dev/null || true
+  q 'SYSTEM FLUSH LOGS' >/dev/null 2>&1 || true
+  echo "  75 s of normal merging: peak $(( $(sort -n "/tmp/merge.$name" | tail -1) >> 20 )) MiB, $(q "SELECT concat(toString(countIf(event_type = 'MergeParts' AND error = 0)), ' merges done, ', toString(countIf(event_type = 'MergeParts' AND error != 0)), ' failed') FROM system.part_log WHERE database = '$name'" 2>/dev/null || echo 'part log unavailable'), parts now $(q "SELECT count() FROM system.parts WHERE database = '$name' AND active"), rows $(q "SELECT count() FROM $name.events")"
   q "DROP DATABASE $name SYNC"
 }
 rows=$(q 'SELECT count() FROM src.events')
@@ -75,4 +81,5 @@ for cap in $caps; do
   echo "== cap $cap MiB"
   load "today_$cap" "$cap" 'optimize_on_insert = 0' no
   load "small_$cap" "$cap" 'optimize_on_insert = 0, max_insert_threads = 1, max_insert_block_size = 65536, min_insert_block_size_rows = 65536, min_insert_block_size_bytes = 67108864' yes
+  load "medium_$cap" "$cap" 'optimize_on_insert = 0, max_insert_threads = 1, max_insert_block_size = 250000, min_insert_block_size_rows = 250000, min_insert_block_size_bytes = 134217728' yes
 done
