@@ -82,7 +82,5 @@ rows=$(q 'SELECT count() FROM src.events')
 for cap in $caps; do
   echo "== cap $cap MiB"
   load "today_$cap" "$cap" 'optimize_on_insert = 0' no
-  load "small_$cap" "$cap" 'optimize_on_insert = 0, max_insert_threads = 1, max_insert_block_size = 65536, min_insert_block_size_rows = 65536, min_insert_block_size_bytes = 67108864' yes
   load "medium_$cap" "$cap" 'optimize_on_insert = 0, max_insert_threads = 1, max_insert_block_size = 250000, min_insert_block_size_rows = 250000, min_insert_block_size_bytes = 134217728' yes
-  load "medium_pool2_$cap" "$cap" 'optimize_on_insert = 0, max_insert_threads = 1, max_insert_block_size = 250000, min_insert_block_size_rows = 250000, min_insert_block_size_bytes = 134217728' yes 2
 done
