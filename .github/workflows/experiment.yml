@@ -20,4 +20,4 @@ jobs:
         run: |
           CGO_ENABLED=0 go build -trimpath -o "$RUNNER_TEMP/plugin" .
           df -h /mnt | tail -1
-          sudo CI=true experiments/json-load.sh "$RUNNER_TEMP/plugin" ${{ vars.EXPERIMENT_ROWS || '1' }} "${{ vars.EXPERIMENT_CAPS || '3072' }}"
+          sudo CI=true experiments/json-load.sh "$RUNNER_TEMP/plugin" 12 "3072 4608"

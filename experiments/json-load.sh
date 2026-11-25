@@ -43,9 +43,11 @@ curl -fsS -H 'X-ClickHouse-User: default' -H "X-ClickHouse-Key: $admin" --data-b
 ls -la /mnt/events.native | awk '{print "export file: " int($5/1048576) " MiB"}'
 
 caps=${3:-3072}
-restart_with() { # restart_with CAP_MIB
+restart_with() { # restart_with CAP_MIB [MERGE_POOL]
+  local pool=''
+  [[ -n "${2:-}" ]] && pool="<background_pool_size>$2</background_pool_size><background_merges_mutations_concurrency_ratio>1</background_merges_mutations_concurrency_ratio>"
   cat > /etc/clickhouse-server/config.d/zz-experiment.xml <<XML
-<clickhouse><max_server_memory_usage>$(( $1 << 20 ))</max_server_memory_usage><max_server_memory_usage_to_ram_ratio>1</max_server_memory_usage_to_ram_ratio></clickhouse>
+<clickhouse><max_server_memory_usage>$(( $1 << 20 ))</max_server_memory_usage><max_server_memory_usage_to_ram_ratio>1</max_server_memory_usage_to_ram_ratio>$pool</clickhouse>
 XML
   systemctl restart clickhouse-server
   for _ in $(seq 1 90); do q 'SELECT 1' >/dev/null 2>&1 && return 0; sleep 1; done
@@ -53,8 +55,8 @@ XML
 }
 # load NAME CAP INSERT_SETTINGS HOLD_MERGES: a fresh server, one load, then a full merge.
 load() {
-  local name=$1 cap=$2 settings=$3 hold=$4 peak status took started
-  restart_with "$cap"
+  local name=$1 cap=$2 settings=$3 hold=$4 pool=${5:-} peak status took started
+  restart_with "$cap" "$pool"
   q "CREATE DATABASE $name"; q "$(table "$name")"
   [[ $hold == yes ]] && q "SYSTEM STOP MERGES $name.events"
   ( while :; do q "SELECT value FROM system.metrics WHERE metric = 'MemoryTracking'" 2>/dev/null || echo 0; sleep 0.5; done ) > "/tmp/mem.$name" &
@@ -82,4 +84,5 @@ for cap in $caps; do
   load "today_$cap" "$cap" 'optimize_on_insert = 0' no
   load "small_$cap" "$cap" 'optimize_on_insert = 0, max_insert_threads = 1, max_insert_block_size = 65536, min_insert_block_size_rows = 65536, min_insert_block_size_bytes = 67108864' yes
   load "medium_$cap" "$cap" 'optimize_on_insert = 0, max_insert_threads = 1, max_insert_block_size = 250000, min_insert_block_size_rows = 250000, min_insert_block_size_bytes = 134217728' yes
+  load "medium_pool2_$cap" "$cap" 'optimize_on_insert = 0, max_insert_threads = 1, max_insert_block_size = 250000, min_insert_block_size_rows = 250000, min_insert_block_size_bytes = 134217728' yes 2
 done
